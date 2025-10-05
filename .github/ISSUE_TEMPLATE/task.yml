@@ -1,0 +1,21 @@
+name: Task
+description: Work item for Planner → Builder → Reviewer pipeline
+title: "[Task] "
+labels: ["task"]
+body:
+  - type: textarea
+    id: brief
+    attributes:
+      label: Brief
+      description: Plain-English request/result expected.
+      placeholder: e.g., "Add pricing page with FAQ accordion."
+    validations: { required: true }
+  - type: input
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "AC1…, AC2…"
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / links

@@ -1,0 +1,16 @@
+name: Bug report
+description: Something broke or behaves oddly
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: expected
+    attributes: { label: Expected }
+  - type: textarea
+    id: actual
+    attributes: { label: Actual }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1) … 2) … 3) …"

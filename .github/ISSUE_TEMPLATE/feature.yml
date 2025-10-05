@@ -1,0 +1,19 @@
+name: Feature request
+description: Ask for a new capability
+title: "[Feature] "
+labels: ["feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What’s the user problem?
+    validations: { required: true }
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+  - type: textarea
+    id: ac
+    attributes:
+      label: Acceptance criteria
