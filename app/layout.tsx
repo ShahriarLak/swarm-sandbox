@@ -22,3 +22,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+// app/layout.tsx
+import './globals.css'
+import { Inter, Sora } from 'next/font/google'
+
+const inter = Inter({ subsets: ['latin'], variable: '--font-sans' })
+const sora  = Sora({ subsets: ['latin'], variable: '--font-display' })
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body className={`${inter.variable} ${sora.variable} font-sans bg-bg text-fg`}>
+        {children}
+      </body>
+    </html>
+  )
+}
