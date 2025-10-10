@@ -1,23 +1,34 @@
-import type { Metadata } from "next";
-
-import "./globals.css";
-
-import { Footer } from "@/components/ui/footer";
-import { Navbar } from "@/components/ui/navbar";
-import { siteConfig } from "@/content/site";
+// app/layout.tsx
+import type { Metadata } from 'next';
+import './globals.css'; // keep your existing global styles path if different
+import { Inter, Sora } from 'next/font/google';
 
 export const metadata: Metadata = {
-  title: siteConfig.name,
-  description: siteConfig.description,
+  title: 'PulsePilot',
+  description: 'Roadmaps & feedback dashboard',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+});
+
+const sora = Sora({
+  subsets: ['latin'],
+  variable: '--font-display',
+  display: 'swap',
+});
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="en" className="bg-slate-50">
-      <body className="flex min-h-screen flex-col bg-white text-slate-900 antialiased">
-        <Navbar />
-        <main className="flex-1">{children}</main>
-        <Footer />
+    <html lang="en">
+      <body className={`${inter.variable} ${sora.variable} font-sans bg-bg text-fg`}>
+        {children}
       </body>
     </html>
   );
