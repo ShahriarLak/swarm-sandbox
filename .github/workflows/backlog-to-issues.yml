@@ -13,12 +13,13 @@ jobs:
   create:
     name: create
     runs-on: ubuntu-latest
+    # 🚦 Only run when the workflow is on the main branch (skip PR branches)
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Parse backlog and create issues
         uses: actions/github-script@v7
         env:
-          # Change this if you keep your backlog elsewhere
           BACKLOG_PATH: docs/backlog.md
           BACKLOG_LABEL: backlog
         with:
@@ -27,7 +28,6 @@ jobs:
             const labelName = process.env.BACKLOG_LABEL || 'backlog';
             const { owner, repo } = context.repo;
 
-            // --- Helpers ------------------------------------------------------
             function codes(s) {
               return [...s].map(c => c.charCodeAt(0)).join(' ');
             }
@@ -49,7 +49,6 @@ jobs:
 
             async function ensureLabel({ owner, repo, name }) {
               try {
-                // Check existing labels (paged)
                 const labels = await github.paginate(
                   github.rest.issues.listLabelsForRepo,
                   { owner, repo, per_page: 100 }
@@ -61,20 +60,17 @@ jobs:
                 await github.rest.issues.createLabel({
                   owner, repo,
                   name,
-                  color: '0e8a16', // green
+                  color: '0e8a16',
                   description: 'Created by Backlog → Issues workflow'
                 });
                 core.info(`Created label '${name}'`);
               } catch (e) {
-                // If another run created it in the meantime, ignore conflict
                 core.warning(`ensureLabel warning: ${e.message}`);
               }
             }
 
-            // --- Read backlog content ----------------------------------------
             const content = await getFileContent({ owner, repo, path, ref: 'main' });
 
-            // DEBUG: first 20 lines & character codes
             const linesPreview = content.split('\n').slice(0, 20);
             core.info('----- BACKLOG PREVIEW (first 20 lines) -----');
             linesPreview.forEach((l, i) => {
@@ -83,8 +79,6 @@ jobs:
             });
             core.info('--------------------------------------------');
 
-            // --- Parse checklist items ----------------------------------------
-            // Tolerant pattern: optional spaces, - or *, spaces, [ ] (or [x]), spaces, then title
             const re = /^[ \t]*[-*][ \t]+\[[ xX]?\][ \t]+(.+?)\s*$/gm;
             const matches = [];
             for (const m of content.matchAll(re)) {
@@ -100,17 +94,14 @@ jobs:
               return;
             }
 
-            // --- Ensure label exists ------------------------------------------
             await ensureLabel({ owner, repo, name: labelName });
 
-            // --- Get existing open issue titles to dedupe ----------------------
             const openIssues = await github.paginate(
               github.rest.issues.listForRepo,
               { owner, repo, state: 'open', per_page: 100 }
             );
             const existing = new Set(openIssues.map(i => (i.title || '').trim()));
 
-            // --- Create issues -------------------------------------------------
             let created = 0;
             for (const title of matches) {
               if (existing.has(title)) {
