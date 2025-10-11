@@ -1,4 +1,4 @@
 # Backlog
 
-- [ ] Ship SaaS landing page + navbar (link to /dashboard)
-- [ ] Add CI workflow and tests
+- [ ] Implement responsive marketing landing page + navbar
+- [ ] Add CI workflow and unit tests (Vitest)
