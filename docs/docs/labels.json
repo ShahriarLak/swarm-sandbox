@@ -1,0 +1,26 @@
+{
+  "Type": [
+    { "name": "type: feature",  "color": "1f883d", "description": "New capability / value" },
+    { "name": "type: bug",      "color": "d73a4a", "description": "A defect to fix" },
+    { "name": "type: chore",    "color": "8a9496", "description": "Maintenance / cleanup" },
+    { "name": "type: research", "color": "a2eeef", "description": "Spike / investigation" }
+  ],
+  "Priority": [
+    { "name": "priority: P0", "color": "6f42c1", "description": "Immediate / Blocker" },
+    { "name": "priority: P1", "color": "6e40c9", "description": "High impact" },
+    { "name": "priority: P2", "color": "8250df", "description": "Normal / default" },
+    { "name": "priority: P3", "color": "b083f0", "description": "Low / nice-to-have" }
+  ],
+  "Area": [
+    { "name": "area: web",   "color": "0e8a16", "description": "Frontend web app" },
+    { "name": "area: api",   "color": "0366d6", "description": "APIs / backend" },
+    { "name": "area: infra", "color": "bfd4f2", "description": "Infra / builds / tooling" },
+    { "name": "area: data",  "color": "5319e7", "description": "Data / analytics" }
+  ],
+  "Status": [
+    { "name": "status: ready",       "color": "0e8a16", "description": "Ready to pick up" },
+    { "name": "status: in-progress", "color": "fbca04", "description": "Being worked on" },
+    { "name": "status: blocked",     "color": "d93f0b", "description": "Blocked / waiting" },
+    { "name": "needs-info",          "color": "cfd3d7", "description": "Needs more info" }
+  ]
+}
