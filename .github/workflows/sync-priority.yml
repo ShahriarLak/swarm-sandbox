@@ -4,11 +4,9 @@ on:
   issues:
     types: [opened, edited, labeled, unlabeled, reopened]
 
-# Optional but tidy
 permissions:
   contents: read
   issues: write
-  actions: read
 
 jobs:
   sync:
@@ -18,19 +16,16 @@ jobs:
         uses: actions/github-script@v7
         env:
           PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
-          PROJECT_OWNER: ShahriarLak
-          PROJECT_NUMBER: 2   # your project number from the URL
+          PROJECT_NUMBER: 2        # from your URL .../projects/2/...
           FIELD_NAME: Priority
         with:
           script: |
             const token = process.env.PROJECTS_TOKEN;
-            const owner = process.env.PROJECT_OWNER;
             const projectNumber = Number(process.env.PROJECT_NUMBER);
             const fieldName = process.env.FIELD_NAME;
 
             const issue = context.payload.issue;
             const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name).toLowerCase());
-
             const desired =
               labels.includes('priority: high') ? 'High' :
               labels.includes('priority: medium') ? 'Medium' :
@@ -42,14 +37,16 @@ jobs:
             }
 
             const graphql = (query, variables = {}) =>
-              github.graphql(query, { ...variables, headers: { authorization: `token ${token}` } });
+              github.graphql(query, { ...variables, headers: { authorization: `bearer ${token}` } });
 
-            // 1) Get project + Priority field + options
+            // 1) Resolve your user project by NUMBER via the authenticated viewer
             const d1 = await graphql(`
-              query($login:String!, $number:Int!){
-                user(login:$login){
+              query($number:Int!){
+                viewer {
+                  login
                   projectV2(number:$number){
                     id
+                    title
                     fields(first:50){
                       nodes{
                         ... on ProjectV2SingleSelectField { id name options{ id name } }
@@ -59,19 +56,20 @@ jobs:
                   }
                 }
               }`,
-              { login: owner, number: projectNumber }
+              { number: projectNumber }
             );
 
-            const project = d1.user?.projectV2;
-            if (!project) { core.setFailed('Project not found'); return; }
+            const project = d1.viewer?.projectV2;
+            if (!project) {
+              core.setFailed(\`Viewer projectV2 #\${projectNumber} not found (check the number in the URL and token owner).\`);
+              return;
+            }
 
             const priorityField = project.fields.nodes.find(f => f.name === fieldName && f.options);
-            if (!priorityField) { core.setFailed(`Field "${fieldName}" not found`); return; }
+            if (!priorityField) { core.setFailed(\`Field "\${fieldName}" not found\`); return; }
 
-            const option = priorityField.options.find(
-              o => o.name.toLowerCase() === desired.toLowerCase()
-            );
-            if (!option) { core.setFailed(`Option "${desired}" not found`); return; }
+            const option = priorityField.options.find(o => o.name.toLowerCase() === desired.toLowerCase());
+            if (!option) { core.setFailed(\`Option "\${desired}" not found\`); return; }
 
             // 2) Find this issue's Project item by paging the project's items
             const issueNodeId = issue.node_id;
@@ -104,7 +102,7 @@ jobs:
             }
 
             if (!itemId) {
-              core.setFailed(`Issue #${issue.number} is not in project ${projectNumber} (check Auto-add).`);
+              core.setFailed(\`Issue #\${issue.number} is not in this project (check Auto-add).\`);
               return;
             }
 
@@ -121,4 +119,4 @@ jobs:
               { projectId: project.id, itemId, fieldId: priorityField.id, optionId: option.id }
             );
 
-            core.info(`Priority set to ${desired} for issue #${issue.number}`);
+            core.info(\`Priority set to \${desired} for issue #\${issue.number}\`);
