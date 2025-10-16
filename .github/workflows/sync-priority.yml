@@ -1,0 +1,107 @@
+name: Sync Project Priority
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled, reopened]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Priority field from labels
+        uses: actions/github-script@v7
+        env:
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          PROJECT_OWNER: ShahriarLak
+          PROJECT_NUMBER: 2   # your project number from the URL
+          FIELD_NAME: Priority
+        with:
+          script: |
+            const token = process.env.PROJECTS_TOKEN;
+            const owner = process.env.PROJECT_OWNER;
+            const projectNumber = Number(process.env.PROJECT_NUMBER);
+            const fieldName = process.env.FIELD_NAME;
+
+            const issue = context.payload.issue;
+            const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name).toLowerCase());
+
+            // Decide desired Priority from labels
+            const desired =
+              labels.includes('priority: high') ? 'High' :
+              labels.includes('priority: medium') ? 'Medium' :
+              labels.includes('priority: low') ? 'Low' : null;
+
+            if (!desired) {
+              core.info('No priority:* label on this issue; nothing to sync.');
+              return;
+            }
+
+            // 1) Get project + Priority field + options
+            const q1 = `
+              query($login:String!, $number:Int!){
+                user(login:$login){
+                  projectV2(number:$number){
+                    id
+                    fields(first:50){
+                      nodes{
+                        ... on ProjectV2SingleSelectField { id name options{ id name } }
+                        ... on ProjectV2Field { id name }
+                      }
+                    }
+                  }
+                }
+              }`;
+            const d1 = await github.graphql(q1, {
+              login: owner,
+              number: projectNumber,
+              headers: { authorization: `token ${token}` }
+            });
+            const project = d1.user?.projectV2;
+            if (!project) { core.setFailed('Project not found'); return; }
+
+            const priorityField = project.fields.nodes.find(f => f.name === fieldName && f.options);
+            if (!priorityField) { core.setFailed(`Field "${fieldName}" not found`); return; }
+
+            const option = priorityField.options.find(o => o.name.toLowerCase() === desired.toLowerCase());
+            if (!option) { core.setFailed(`Option "${desired}" not found`); return; }
+
+            // 2) Find this issue's Project item
+            const issueId = issue.node_id; // GraphQL node ID
+            const q2 = `
+              query($issueId:ID!){
+                node(id:$issueId){
+                  ... on Issue {
+                    id
+                    projectItems(first:20){
+                      nodes{ id project { number } }
+                    }
+                  }
+                }
+              }`;
+            const d2 = await github.graphql(q2, {
+              issueId,
+              headers: { authorization: `token ${token}` }
+            });
+            const items = d2.node?.projectItems?.nodes || [];
+            const item = items.find(n => n.project?.number === projectNumber);
+            if (!item) { core.setFailed('Issue is not in the project (check Auto-add workflow)'); return; }
+
+            // 3) Update the Priority field
+            const m1 = `
+              mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$projectId,
+                  itemId:$itemId,
+                  fieldId:$fieldId,
+                  value:{ singleSelectOptionId:$optionId }
+                }){ projectV2Item { id } }
+              }`;
+            await github.graphql(m1, {
+              projectId: project.id,
+              itemId: item.id,
+              fieldId: priorityField.id,
+              optionId: option.id,
+              headers: { authorization: `token ${token}` }
+            });
+
+            core.info(`Priority set to ${desired} for issue #${issue.number}`);
