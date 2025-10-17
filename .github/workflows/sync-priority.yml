@@ -26,97 +26,113 @@ jobs:
 
             const issue = context.payload.issue;
             const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name).toLowerCase());
-            const desired =
-              labels.includes('priority: high') ? 'High' :
-              labels.includes('priority: medium') ? 'Medium' :
-              labels.includes('priority: low') ? 'Low' : null;
 
+            function desiredFromLabels(arr) {
+              if (arr.includes('priority: high')) return 'High';
+              if (arr.includes('priority: medium')) return 'Medium';
+              if (arr.includes('priority: low')) return 'Low';
+              return null;
+            }
+
+            const desired = desiredFromLabels(labels);
             if (!desired) {
               core.info('No priority:* label on this issue; nothing to sync.');
               return;
             }
 
-            const graphql = (query, variables = {}) =>
-              github.graphql(query, { ...variables, headers: { authorization: `bearer ${token}` } });
+            async function gql(query, variables) {
+              const resp = await github.request('POST /graphql', {
+                headers: { authorization: 'bearer ' + token },
+                query,
+                variables
+              });
+              if (resp.data && resp.data.errors && resp.data.errors.length) {
+                throw new Error('GraphQL: ' + resp.data.errors.map(e => e.message).join('; '));
+              }
+              return resp.data; // { data: {...} }
+            }
 
-            // 1) Resolve your user project by NUMBER via the authenticated viewer
-            const d1 = await graphql(`
-              query($number:Int!){
-                viewer {
-                  login
-                  projectV2(number:$number){
-                    id
-                    title
-                    fields(first:50){
-                      nodes{
-                        ... on ProjectV2SingleSelectField { id name options{ id name } }
-                        ... on ProjectV2Field { id name }
-                      }
-                    }
-                  }
-                }
-              }`,
-              { number: projectNumber }
-            );
+            // 1) Get project + Priority field + options (via viewer)
+            const q1 = [
+              'query($number:Int!){',
+              '  viewer {',
+              '    login',
+              '    projectV2(number:$number){',
+              '      id',
+              '      fields(first:50){',
+              '        nodes{',
+              '          ... on ProjectV2SingleSelectField { id name options{ id name } }',
+              '          ... on ProjectV2Field { id name }',
+              '        }',
+              '      }',
+              '    }',
+              '  }',
+              '}'
+            ].join('\n');
 
-            const project = d1.viewer?.projectV2;
+            const d1 = await gql(q1, { number: projectNumber });
+            const project = d1.data && d1.data.viewer ? d1.data.viewer.projectV2 : null;
             if (!project) {
-              core.setFailed(\`Viewer projectV2 #\${projectNumber} not found (check the number in the URL and token owner).\`);
+              core.setFailed('viewer.projectV2 #' + projectNumber + ' not found. Check the number and that the token owner is the same user.');
               return;
             }
 
-            const priorityField = project.fields.nodes.find(f => f.name === fieldName && f.options);
-            if (!priorityField) { core.setFailed(\`Field "\${fieldName}" not found\`); return; }
+            const fields = (project.fields && project.fields.nodes) ? project.fields.nodes : [];
+            const priorityField = fields.find(function (f) { return f && f.name === fieldName && f.options; });
+            if (!priorityField) { core.setFailed('Field "' + fieldName + '" not found'); return; }
 
-            const option = priorityField.options.find(o => o.name.toLowerCase() === desired.toLowerCase());
-            if (!option) { core.setFailed(\`Option "\${desired}" not found\`); return; }
+            const option = priorityField.options.find(function (o) { return o && o.name && o.name.toLowerCase() === desired.toLowerCase(); });
+            if (!option) { core.setFailed('Option "' + desired + '" not found'); return; }
 
-            // 2) Find this issue's Project item by paging the project's items
+            // 2) Find this issue's Project item (page items)
             const issueNodeId = issue.node_id;
-            let itemId = null, after = null;
-            for (let i = 0; i < 20; i++) {
-              const d2 = await graphql(`
-                query($pid:ID!, $after:String){
-                  node(id:$pid){
-                    ... on ProjectV2 {
-                      items(first:50, after:$after){
-                        nodes{
-                          id
-                          content{ __typename ... on Issue { id number } }
-                        }
-                        pageInfo{ hasNextPage endCursor }
-                      }
-                    }
-                  }
-                }`,
-                { pid: project.id, after }
-              );
+            let itemId = null;
+            let after = null;
+            for (let i = 0; i < 30; i++) {
+              const q2 = [
+                'query($pid:ID!, $after:String){',
+                '  node(id:$pid){',
+                '    ... on ProjectV2 {',
+                '      items(first:50, after:$after){',
+                '        nodes{',
+                '          id',
+                '          content{ __typename ... on Issue { id number } }',
+                '        }',
+                '        pageInfo{ hasNextPage endCursor }',
+                '      }',
+                '    }',
+                '  }',
+                '}'
+              ].join('\n');
 
-              const items = d2.node.items.nodes;
-              const hit = items.find(n => n.content?.__typename === 'Issue' && n.content.id === issueNodeId);
-              if (hit) { itemId = hit.id; break; }
-
-              const pi = d2.node.items.pageInfo;
-              if (!pi.hasNextPage) break;
+              const d2 = await gql(q2, { pid: project.id, after: after });
+              const node = d2.data ? d2.data.node : null;
+              const items = node && node.items ? node.items.nodes || [] : [];
+              for (const n of items) {
+                if (n && n.content && n.content.__typename === 'Issue' && n.content.id === issueNodeId) {
+                  itemId = n.id;
+                  break;
+                }
+              }
+              if (itemId) break;
+              const pi = node && node.items ? node.items.pageInfo : null;
+              if (!pi || !pi.hasNextPage) break;
               after = pi.endCursor;
             }
+            if (!itemId) { core.setFailed('Issue #' + issue.number + ' is not in this project (check Auto-add)'); return; }
 
-            if (!itemId) {
-              core.setFailed(\`Issue #\${issue.number} is not in this project (check Auto-add).\`);
-              return;
-            }
+            // 3) Update field
+            const m1 = [
+              'mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){',
+              '  updateProjectV2ItemFieldValue(input:{',
+              '    projectId:$projectId,',
+              '    itemId:$itemId,',
+              '    fieldId:$fieldId,',
+              '    value:{ singleSelectOptionId:$optionId }',
+              '  }){ projectV2Item { id } }',
+              '}'
+            ].join('\n');
 
-            // 3) Update the Priority field
-            await graphql(`
-              mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
-                updateProjectV2ItemFieldValue(input:{
-                  projectId:$projectId,
-                  itemId:$itemId,
-                  fieldId:$fieldId,
-                  value:{ singleSelectOptionId:$optionId }
-                }){ projectV2Item { id } }
-              }`,
-              { projectId: project.id, itemId, fieldId: priorityField.id, optionId: option.id }
-            );
+            await gql(m1, { projectId: project.id, itemId: itemId, fieldId: priorityField.id, optionId: option.id });
 
-            core.info(\`Priority set to \${desired} for issue #\${issue.number}\`);
+            core.info('Priority set to ' + desired + ' for issue #' + issue.number);
