@@ -49,16 +49,29 @@ jobs:
               if (resp.data && resp.data.errors && resp.data.errors.length) {
                 throw new Error('GraphQL: ' + resp.data.errors.map(e => e.message).join('; '));
               }
-              return resp.data; // { data: {...} }
+              return resp.data;
             }
 
-            // 1) Get project + Priority field + options (via viewer)
+            // --- DEBUG: who is this token and what projects can it see? ---
+            const qWho = [
+              'query{',
+              '  viewer{',
+              '    login',
+              '    projectsV2(first:20){ nodes{ number title } }',
+              '  }',
+              '}'
+            ].join('\n');
+            const dWho = await gql(qWho, {});
+            core.info('Token viewer.login = ' + dWho.data.viewer.login);
+            core.info('Viewer projects: ' + JSON.stringify(dWho.data.viewer.projectsV2.nodes));
+
+            // 1) Get project + Priority field + options (by viewer + number)
             const q1 = [
               'query($number:Int!){',
               '  viewer {',
-              '    login',
               '    projectV2(number:$number){',
               '      id',
+              '      title',
               '      fields(first:50){',
               '        nodes{',
               '          ... on ProjectV2SingleSelectField { id name options{ id name } }',
@@ -71,17 +84,17 @@ jobs:
             ].join('\n');
 
             const d1 = await gql(q1, { number: projectNumber });
-            const project = d1.data && d1.data.viewer ? d1.data.viewer.projectV2 : null;
+            const project = d1.data?.viewer?.projectV2 || null;
             if (!project) {
-              core.setFailed('viewer.projectV2 #' + projectNumber + ' not found. Check the number and that the token owner is the same user.');
+              core.setFailed('viewer.projectV2 #' + projectNumber + ' not found. Likely cause: token belongs to a different GitHub user than the owner of this private project. Create the classic PAT on the SAME account that owns the project, then update the PROJECTS_TOKEN secret.');
               return;
             }
 
-            const fields = (project.fields && project.fields.nodes) ? project.fields.nodes : [];
-            const priorityField = fields.find(function (f) { return f && f.name === fieldName && f.options; });
+            const fields = project.fields?.nodes || [];
+            const priorityField = fields.find(f => f && f.name === fieldName && f.options);
             if (!priorityField) { core.setFailed('Field "' + fieldName + '" not found'); return; }
 
-            const option = priorityField.options.find(function (o) { return o && o.name && o.name.toLowerCase() === desired.toLowerCase(); });
+            const option = priorityField.options.find(o => o && o.name && o.name.toLowerCase() === desired.toLowerCase());
             if (!option) { core.setFailed('Option "' + desired + '" not found'); return; }
 
             // 2) Find this issue's Project item (page items)
