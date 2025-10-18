@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   set-in-progress:
-    # Only run on issue/PR events (avoid running on pushes to this file)
     if: ${{ github.event_name == 'issues' || github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
 
@@ -31,7 +30,6 @@ jobs:
             const STATUS_NAME = process.env.STATUS_NAME || 'In Progress';
             if (!token) { core.setFailed('Missing PROJECTS_TOKEN secret'); return; }
 
-            // Minimal GraphQL helper using PAT (NOT the bot token)
             async function gql(query, variables){
               const res = await fetch('https://api.github.com/graphql', {
                 method: 'POST',
@@ -39,29 +37,30 @@ jobs:
                 body: JSON.stringify({ query, variables })
               });
               const json = await res.json();
-              if (json.errors && json.errors.length){
-                throw new Error('GraphQL: ' + json.errors.map(e=>e.message).join('; '));
-              }
+              if (json.errors?.length) throw new Error('GraphQL: ' + json.errors.map(e=>e.message).join('; '));
               return json.data;
             }
 
-            // Resolve the viewer's user project + Status field + option ids
+            // Who am I?
+            const who = await gql('query{ viewer{ login } }', {});
+            core.info('Token viewer.login = ' + who.viewer.login);
+
+            // Get project + Status field (use fragments on union)
             const d1 = await gql(
-              'query($n:Int!){ viewer{ projectV2(number:$n){ id title fields(first:50){ nodes{ __typename id name ... on ProjectV2SingleSelectField { options{ id name } } } } } } }',
+              'query($n:Int!){ viewer{ projectV2(number:$n){ id title fields(first:50){ nodes{ __typename ... on ProjectV2SingleSelectField { id name options{ id name } } ... on ProjectV2Field { id name } } } } } }',
               { n: projectNumber }
             );
-            const project = d1.viewer && d1.viewer.projectV2;
+            const project = d1.viewer?.projectV2;
             if (!project){ core.setFailed('viewer.projectV2 not found; check PROJECT_NUMBER and PAT owner'); return; }
+            core.info('Resolved project: ' + project.title);
 
-            // Find Status field + the "In Progress" option id
-            const statusField = (project.fields?.nodes || []).find(f => f?.name === 'Status' && f.options);
+            const fields = project.fields?.nodes || [];
+            const statusField = fields.find(f => f?.__typename === 'ProjectV2SingleSelectField' && f.name === 'Status');
             if (!statusField){ core.setFailed('Project field "Status" not found'); return; }
             const inProgressOpt = statusField.options.find(o => o?.name === STATUS_NAME);
             if (!inProgressOpt){ core.setFailed('Status option "'+STATUS_NAME+'" not found'); return; }
 
-            // Helpers
             async function findOrAddItemForIssue(issueNodeId){
-              // Try find existing item
               let after = null;
               for (let i=0;i<30;i++){
                 const d = await gql(
@@ -75,7 +74,6 @@ jobs:
                 if (!pi?.hasNextPage) break;
                 after = pi.endCursor;
               }
-              // Not found → add
               const m = await gql(
                 'mutation($projectId:ID!,$contentId:ID!){ addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }){ item { id } } }',
                 { projectId: project.id, contentId: issueNodeId }
@@ -90,7 +88,6 @@ jobs:
               );
             }
 
-            // Branch for issue vs PR events
             if (context.eventName === 'issues') {
               if (context.payload.action !== 'assigned'){ core.info('Not an assign action; skipping'); return; }
               const issue = context.payload.issue;
@@ -104,15 +101,12 @@ jobs:
               const pr = context.payload.pull_request;
               const owner = context.repo.owner;
               const repo  = context.repo.repo;
-
-              // Get issues the PR will close (requires closing keywords e.g. "Fixes #12")
               const d = await gql(
                 'query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ closingIssuesReferences(first:20){ nodes{ id number } } } } }',
                 { o: owner, r: repo, n: pr.number }
               );
               const issues = d.repository?.pullRequest?.closingIssuesReferences?.nodes || [];
               if (!issues.length){ core.info('PR has no closingIssuesReferences; nothing to update.'); return; }
-
               for (const is of issues) {
                 const itemId = await findOrAddItemForIssue(is.id);
                 await setStatus(itemId);
