@@ -1,115 +1,124 @@
-name: Sync Project Priority
+name: Auto In Progress
 
 on:
   issues:
-    types: [opened, edited, labeled, unlabeled, reopened]
+    types: [assigned]
+  pull_request:
+    types: [opened, reopened, ready_for_review]
 
 permissions:
   contents: read
   issues: write
+  pull-requests: read
 
 jobs:
-  sync:
-    # Extra guard so the job never runs on non-issue events (e.g., when you edit this file)
-    if: ${{ github.event_name == 'issues' }}
+  set-in-progress:
+    # Only run on issue/PR events (avoid running on pushes to this file)
+    if: ${{ github.event_name == 'issues' || github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Sync Priority field from labels
+      - name: Set Project Status = In Progress
         uses: actions/github-script@v7
         env:
           PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
-          PROJECT_NUMBER: 2        # from your URL .../projects/2/...
-          FIELD_NAME: Priority
+          PROJECT_NUMBER: 2              # from your URL .../projects/2/...
+          STATUS_NAME: In Progress       # must match your Project's Status option
         with:
           script: |
             const token = process.env.PROJECTS_TOKEN || '';
             const projectNumber = Number(process.env.PROJECT_NUMBER);
-            const fieldName = process.env.FIELD_NAME;
-
+            const STATUS_NAME = process.env.STATUS_NAME || 'In Progress';
             if (!token) { core.setFailed('Missing PROJECTS_TOKEN secret'); return; }
-            if (!context.payload.issue) { core.info('No issue in payload; skipping.'); return; }
 
-            const issue = context.payload.issue;
-            const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name).toLowerCase());
-
-            // Decide desired Priority from labels
-            const desired =
-              labels.includes('priority: high')   ? 'High'   :
-              labels.includes('priority: medium') ? 'Medium' :
-              labels.includes('priority: low')    ? 'Low'    : null;
-
-            if (!desired) {
-              core.info('No priority:* label; nothing to sync.');
-              return;
-            }
-
-            // Minimal GraphQL helper using your PAT (NOT the GitHub Actions bot token)
-            async function gql(query, variables) {
+            // Minimal GraphQL helper using PAT (NOT the bot token)
+            async function gql(query, variables){
               const res = await fetch('https://api.github.com/graphql', {
                 method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': 'bearer ' + token
-                },
+                headers: { 'Content-Type':'application/json', 'Authorization':'bearer ' + token },
                 body: JSON.stringify({ query, variables })
               });
               const json = await res.json();
-              if (json.errors && json.errors.length) {
-                throw new Error('GraphQL: ' + json.errors.map(e => e.message).join('; '));
+              if (json.errors && json.errors.length){
+                throw new Error('GraphQL: ' + json.errors.map(e=>e.message).join('; '));
               }
               return json.data;
             }
 
-            // Debug the token owner and visible user projects
-            const who = await gql(
-              'query{ viewer{ login projectsV2(first:50){ nodes{ number title } } } }',
-              {}
-            );
-            core.info('Token viewer.login = ' + who.viewer.login);
-            core.info('Viewer projects = ' + JSON.stringify(who.viewer.projectsV2.nodes));
-
-            // Resolve your USER project by number via viewer
+            // Resolve the viewer's user project + Status field + option ids
             const d1 = await gql(
-              'query($n:Int!){ viewer{ projectV2(number:$n){ id title fields(first:50){ nodes{ ... on ProjectV2SingleSelectField { id name options{ id name } } ... on ProjectV2Field { id name } } } } } }',
+              'query($n:Int!){ viewer{ projectV2(number:$n){ id title fields(first:50){ nodes{ __typename id name ... on ProjectV2SingleSelectField { options{ id name } } } } } } }',
               { n: projectNumber }
             );
             const project = d1.viewer && d1.viewer.projectV2;
-            if (!project) {
-              core.setFailed('viewer.projectV2 #' + projectNumber + ' not found. Make sure the PAT was created on the SAME GitHub account that owns this user project.');
+            if (!project){ core.setFailed('viewer.projectV2 not found; check PROJECT_NUMBER and PAT owner'); return; }
+
+            // Find Status field + the "In Progress" option id
+            const statusField = (project.fields?.nodes || []).find(f => f?.name === 'Status' && f.options);
+            if (!statusField){ core.setFailed('Project field "Status" not found'); return; }
+            const inProgressOpt = statusField.options.find(o => o?.name === STATUS_NAME);
+            if (!inProgressOpt){ core.setFailed('Status option "'+STATUS_NAME+'" not found'); return; }
+
+            // Helpers
+            async function findOrAddItemForIssue(issueNodeId){
+              // Try find existing item
+              let after = null;
+              for (let i=0;i<30;i++){
+                const d = await gql(
+                  'query($pid:ID!,$after:String){ node(id:$pid){ ... on ProjectV2 { items(first:50, after:$after){ nodes{ id content{ __typename ... on Issue { id number } } } pageInfo{ hasNextPage endCursor } } } } }',
+                  { pid: project.id, after }
+                );
+                const items = d.node?.items?.nodes || [];
+                const hit = items.find(n => n?.content?.__typename === 'Issue' && n.content.id === issueNodeId);
+                if (hit) return hit.id;
+                const pi = d.node?.items?.pageInfo;
+                if (!pi?.hasNextPage) break;
+                after = pi.endCursor;
+              }
+              // Not found → add
+              const m = await gql(
+                'mutation($projectId:ID!,$contentId:ID!){ addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }){ item { id } } }',
+                { projectId: project.id, contentId: issueNodeId }
+              );
+              return m.addProjectV2ItemById.item.id;
+            }
+
+            async function setStatus(itemId){
+              await gql(
+                'mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$opt:String!){ updateProjectV2ItemFieldValue(input:{ projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{ singleSelectOptionId:$opt } }){ projectV2Item { id } } }',
+                { projectId: project.id, itemId, fieldId: statusField.id, opt: inProgressOpt.id }
+              );
+            }
+
+            // Branch for issue vs PR events
+            if (context.eventName === 'issues') {
+              if (context.payload.action !== 'assigned'){ core.info('Not an assign action; skipping'); return; }
+              const issue = context.payload.issue;
+              const itemId = await findOrAddItemForIssue(issue.node_id);
+              await setStatus(itemId);
+              core.info('Status set to "'+STATUS_NAME+'" for issue #'+issue.number);
               return;
             }
-            core.info('Resolved project: ' + project.title);
 
-            // Find the "Priority" field and the desired option
-            const fields = project.fields?.nodes || [];
-            const priorityField = fields.find(f => f && f.name === fieldName && f.options);
-            if (!priorityField) { core.setFailed('Project field "' + fieldName + '" not found'); return; }
+            if (context.eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              const owner = context.repo.owner;
+              const repo  = context.repo.repo;
 
-            const option = priorityField.options.find(o => o && o.name && o.name.toLowerCase() === desired.toLowerCase());
-            if (!option) { core.setFailed('Option "' + desired + '" not found'); return; }
-
-            // Find this issue's Project item (page through items)
-            const issueNodeId = issue.node_id;
-            let itemId = null, after = null;
-            for (let i = 0; i < 30; i++) {
-              const d2 = await gql(
-                'query($pid:ID!, $after:String){ node(id:$pid){ ... on ProjectV2 { items(first:50, after:$after){ nodes{ id content{ __typename ... on Issue { id number } } } pageInfo{ hasNextPage endCursor } } } } }',
-                { pid: project.id, after }
+              // Get issues the PR will close (requires closing keywords e.g. "Fixes #12")
+              const d = await gql(
+                'query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ closingIssuesReferences(first:20){ nodes{ id number } } } } }',
+                { o: owner, r: repo, n: pr.number }
               );
-              const items = d2.node?.items?.nodes || [];
-              const hit = items.find(n => n?.content?.__typename === 'Issue' && n.content.id === issueNodeId);
-              if (hit) { itemId = hit.id; break; }
-              const pi = d2.node?.items?.pageInfo;
-              if (!pi?.hasNextPage) break;
-              after = pi.endCursor;
+              const issues = d.repository?.pullRequest?.closingIssuesReferences?.nodes || [];
+              if (!issues.length){ core.info('PR has no closingIssuesReferences; nothing to update.'); return; }
+
+              for (const is of issues) {
+                const itemId = await findOrAddItemForIssue(is.id);
+                await setStatus(itemId);
+                core.info('Status set to "'+STATUS_NAME+'" for issue #'+is.number+' via PR #'+pr.number);
+              }
+              return;
             }
-            if (!itemId) { core.setFailed('Issue #' + issue.number + ' is not in this project (check Auto-add workflow)'); return; }
 
-            // Update the Priority field
-            await gql(
-              'mutation($p:ID!, $i:ID!, $f:ID!, $o:String!){ updateProjectV2ItemFieldValue(input:{ projectId:$p, itemId:$i, fieldId:$f, value:{ singleSelectOptionId:$o } }){ projectV2Item { id } } }',
-              { p: project.id, i: itemId, f: priorityField.id, o: option.id }
-            );
-
-            core.info('Priority set to ' + desired + ' for issue #' + issue.number);
+            core.info('Unhandled event, skipping.');
