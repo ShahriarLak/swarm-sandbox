@@ -1,75 +1,115 @@
+name: Sync Project Priority
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled, reopened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    # Extra guard so the job never runs on non-issue events (e.g., when you edit this file)
+    if: ${{ github.event_name == 'issues' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Sync Priority field from labels
+        uses: actions/github-script@v7
+        env:
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          PROJECT_NUMBER: 2        # from your URL .../projects/2/...
+          FIELD_NAME: Priority
         with:
           script: |
             const token = process.env.PROJECTS_TOKEN || '';
             const projectNumber = Number(process.env.PROJECT_NUMBER);
             const fieldName = process.env.FIELD_NAME;
 
-            core.info('Has PAT secret: ' + (token ? 'yes' : 'no'));
+            if (!token) { core.setFailed('Missing PROJECTS_TOKEN secret'); return; }
+            if (!context.payload.issue) { core.info('No issue in payload; skipping.'); return; }
 
             const issue = context.payload.issue;
             const labels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name).toLowerCase());
 
-            function desiredFromLabels(arr){
-              if (arr.includes('priority: high')) return 'High';
-              if (arr.includes('priority: medium')) return 'Medium';
-              if (arr.includes('priority: low')) return 'Low';
-              return null;
-            }
-            const desired = desiredFromLabels(labels);
-            if (!desired){ core.info('No priority:* label; nothing to do.'); return; }
+            // Decide desired Priority from labels
+            const desired =
+              labels.includes('priority: high')   ? 'High'   :
+              labels.includes('priority: medium') ? 'Medium' :
+              labels.includes('priority: low')    ? 'Low'    : null;
 
-            async function gql(query, variables){
+            if (!desired) {
+              core.info('No priority:* label; nothing to sync.');
+              return;
+            }
+
+            // Minimal GraphQL helper using your PAT (NOT the GitHub Actions bot token)
+            async function gql(query, variables) {
               const res = await fetch('https://api.github.com/graphql', {
                 method: 'POST',
-                headers: { 'Content-Type':'application/json', 'Authorization':'bearer ' + token },
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': 'bearer ' + token
+                },
                 body: JSON.stringify({ query, variables })
               });
               const json = await res.json();
-              if (json.errors && json.errors.length){
-                throw new Error('GraphQL: ' + json.errors.map(e=>e.message).join('; '));
+              if (json.errors && json.errors.length) {
+                throw new Error('GraphQL: ' + json.errors.map(e => e.message).join('; '));
               }
               return json.data;
             }
 
-            // Debug who the PAT belongs to
-            const who = await gql('query{ viewer{ login projectsV2(first:50){ nodes{ number title } } } }', {});
+            // Debug the token owner and visible user projects
+            const who = await gql(
+              'query{ viewer{ login projectsV2(first:50){ nodes{ number title } } } }',
+              {}
+            );
             core.info('Token viewer.login = ' + who.viewer.login);
             core.info('Viewer projects = ' + JSON.stringify(who.viewer.projectsV2.nodes));
 
-            // Get the viewer project by number
+            // Resolve your USER project by number via viewer
             const d1 = await gql(
               'query($n:Int!){ viewer{ projectV2(number:$n){ id title fields(first:50){ nodes{ ... on ProjectV2SingleSelectField { id name options{ id name } } ... on ProjectV2Field { id name } } } } } }',
               { n: projectNumber }
             );
             const project = d1.viewer && d1.viewer.projectV2;
-            if (!project){ core.setFailed('viewer.projectV2 #' + projectNumber + ' not found'); return; }
+            if (!project) {
+              core.setFailed('viewer.projectV2 #' + projectNumber + ' not found. Make sure the PAT was created on the SAME GitHub account that owns this user project.');
+              return;
+            }
+            core.info('Resolved project: ' + project.title);
 
+            // Find the "Priority" field and the desired option
             const fields = project.fields?.nodes || [];
             const priorityField = fields.find(f => f && f.name === fieldName && f.options);
-            if (!priorityField){ core.setFailed('Field "' + fieldName + '" not found'); return; }
-            const option = priorityField.options.find(o => o && o.name && o.name.toLowerCase() === desired.toLowerCase());
-            if (!option){ core.setFailed('Option "' + desired + '" not found'); return; }
+            if (!priorityField) { core.setFailed('Project field "' + fieldName + '" not found'); return; }
 
-            // Find this issue's project item
+            const option = priorityField.options.find(o => o && o.name && o.name.toLowerCase() === desired.toLowerCase());
+            if (!option) { core.setFailed('Option "' + desired + '" not found'); return; }
+
+            // Find this issue's Project item (page through items)
             const issueNodeId = issue.node_id;
             let itemId = null, after = null;
-            for (let i=0;i<30;i++){
+            for (let i = 0; i < 30; i++) {
               const d2 = await gql(
                 'query($pid:ID!, $after:String){ node(id:$pid){ ... on ProjectV2 { items(first:50, after:$after){ nodes{ id content{ __typename ... on Issue { id number } } } pageInfo{ hasNextPage endCursor } } } } }',
                 { pid: project.id, after }
               );
               const items = d2.node?.items?.nodes || [];
               const hit = items.find(n => n?.content?.__typename === 'Issue' && n.content.id === issueNodeId);
-              if (hit){ itemId = hit.id; break; }
+              if (hit) { itemId = hit.id; break; }
               const pi = d2.node?.items?.pageInfo;
               if (!pi?.hasNextPage) break;
               after = pi.endCursor;
             }
-            if (!itemId){ core.setFailed('Issue #' + issue.number + ' is not in this project'); return; }
+            if (!itemId) { core.setFailed('Issue #' + issue.number + ' is not in this project (check Auto-add workflow)'); return; }
 
-            // Update the field
+            // Update the Priority field
             await gql(
               'mutation($p:ID!, $i:ID!, $f:ID!, $o:String!){ updateProjectV2ItemFieldValue(input:{ projectId:$p, itemId:$i, fieldId:$f, value:{ singleSelectOptionId:$o } }){ projectV2Item { id } } }',
               { p: project.id, i: itemId, f: priorityField.id, o: option.id }
             );
+
             core.info('Priority set to ' + desired + ' for issue #' + issue.number);
